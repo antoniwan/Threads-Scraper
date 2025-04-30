@@ -35,25 +35,31 @@ class ThreadsScraper:
     async def __aenter__(self):
         """Context manager entry."""
         logger.info("Starting Playwright browser")
-        playwright = await async_playwright().start()
+        self.playwright = await async_playwright().start()
         
         # Create a new context with persistent storage
-        context = await playwright.chromium.launch_persistent_context(
+        self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir="./user_data",
             headless=self.headless,
             args=['--disable-blink-features=AutomationControlled']
         )
         
-        self.browser = context.browser
-        self.page = context.pages[0]
+        self.browser = self.context.browser
+        self.page = self.context.pages[0]
         
         return self
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
-        if self.browser:
-            await self.browser.close()
-        self.db.close()
+        try:
+            if self.context:
+                await self.context.close()
+            if self.playwright:
+                await self.playwright.stop()
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
+        finally:
+            self.db.close()
 
     async def ensure_logged_in(self) -> bool:
         """
@@ -62,17 +68,29 @@ class ThreadsScraper:
         """
         logger.info("Checking login status...")
         
-        # Go to Threads homepage first
-        await self.page.goto('https://www.threads.net', wait_until='networkidle')
-        
-        # Check if we're redirected to login
-        current_url = self.page.url
-        if 'instagram.com' in current_url or 'login' in current_url:
-            logger.info("Not logged in. Please log in manually.")
-            return False
+        try:
+            # Go to Threads homepage with a more lenient wait condition
+            await self.page.goto('https://www.threads.net', wait_until='domcontentloaded')
             
-        logger.info("Successfully logged in")
-        return True
+            # Check if we're redirected to login
+            current_url = self.page.url
+            if 'instagram.com' in current_url or 'login' in current_url:
+                logger.info("Not logged in. Please log in manually.")
+                return False
+                
+            logger.info("Successfully logged in")
+            return True
+        except Exception as e:
+            logger.error(f"Error checking login status: {str(e)}")
+            # If we get an error but the page is still loaded, check the URL
+            try:
+                current_url = self.page.url
+                if 'instagram.com' not in current_url and 'login' not in current_url:
+                    logger.info("Appears to be logged in despite navigation error")
+                    return True
+            except:
+                pass
+            return False
             
     async def get_user_profile(self, username: str) -> Dict:
         """
@@ -91,19 +109,33 @@ class ThreadsScraper:
             if not is_logged_in:
                 raise Exception("Please log in first")
                 
-            await self.page.goto(f'https://www.threads.net/@{username}', wait_until='networkidle')
+            # Navigate to profile with a more lenient wait condition
+            await self.page.goto(f'https://www.threads.net/@{username}', wait_until='domcontentloaded')
             logger.info("Page loaded, waiting for profile data")
             
-            # Wait for main content
-            await self.page.wait_for_selector('main', timeout=5000)
-            logger.info("Main content loaded")
+            # Wait for either main content or a reasonable timeout
+            try:
+                await self.page.wait_for_selector('main', timeout=10000)
+                logger.info("Main content loaded")
+            except TimeoutError:
+                logger.warning("Timeout waiting for main content, proceeding anyway")
             
             # Extract profile data from the page
             profile_data = await self.page.evaluate("""() => {
                 const data = {};
-                const bio = document.querySelector('h1')?.nextElementSibling?.textContent;
-                const followers = document.querySelector('a[href*="/followers"]')?.textContent;
-                const following = document.querySelector('a[href*="/following"]')?.textContent;
+                
+                // Try different selectors for bio
+                const bio = document.querySelector('h1')?.nextElementSibling?.textContent || 
+                           document.querySelector('div[dir="auto"]')?.textContent;
+                
+                // Try different selectors for followers/following
+                const followers = document.querySelector('a[href*="/followers"]')?.textContent ||
+                                document.querySelector('span[class*="followers"]')?.textContent ||
+                                document.querySelector('span[class*="follower"]')?.textContent;
+                
+                const following = document.querySelector('a[href*="/following"]')?.textContent ||
+                                document.querySelector('span[class*="following"]')?.textContent ||
+                                document.querySelector('span[class*="follow"]')?.textContent;
                 
                 data['bio'] = bio;
                 data['followers'] = followers;
@@ -123,9 +155,6 @@ class ThreadsScraper:
                     "is_final": True
                 }
             }
-        except TimeoutError:
-            logger.error("Timeout waiting for profile data")
-            raise
         except Exception as e:
             logger.error(f"Error getting profile: {str(e)}")
             raise
@@ -147,12 +176,16 @@ class ThreadsScraper:
             if not is_logged_in:
                 raise Exception("Please log in first")
                 
-            await self.page.goto(f'https://www.threads.net/@{username}', wait_until='networkidle')
+            # Navigate to profile with a more lenient wait condition
+            await self.page.goto(f'https://www.threads.net/@{username}', wait_until='domcontentloaded')
             logger.info("Page loaded, waiting for threads")
             
-            # Wait for threads
-            await self.page.wait_for_selector('article', timeout=5000)
-            logger.info("Threads loaded")
+            # Wait for threads with a longer timeout
+            try:
+                await self.page.wait_for_selector('article', timeout=10000)
+                logger.info("Threads loaded")
+            except TimeoutError:
+                logger.warning("Timeout waiting for threads, proceeding anyway")
             
             # Scroll to load more threads
             await self.page.evaluate("""() => {
@@ -167,13 +200,45 @@ class ThreadsScraper:
                     const text = article.querySelector('div[dir="auto"]')?.textContent;
                     const likes = article.querySelector('span[class*="like"]')?.textContent;
                     const replies = article.querySelector('span[class*="reply"]')?.textContent;
+                    const reposts = article.querySelector('span[class*="repost"]')?.textContent;
                     const time = article.querySelector('time')?.dateTime;
+                    const url = article.querySelector('a[href*="/post/"]')?.href;
+                    
+                    // Extract media URLs
+                    const mediaUrls = [];
+                    article.querySelectorAll('img').forEach(img => {
+                        if (img.src && !img.src.includes('data:')) {
+                            mediaUrls.push(img.src);
+                        }
+                    });
+                    
+                    // Extract hashtags and mentions
+                    const hashtags = [];
+                    const mentions = [];
+                    if (text) {
+                        text.split(' ').forEach(word => {
+                            if (word.startsWith('#')) {
+                                hashtags.push(word.slice(1));
+                            } else if (word.startsWith('@')) {
+                                mentions.push(word.slice(1));
+                            }
+                        });
+                    }
+                    
+                    // Extract thread ID from URL
+                    const threadId = url ? url.split('/').pop() : '';
                     
                     threads.push({
+                        id: threadId,
                         text,
                         likes,
                         replies,
-                        time
+                        reposts,
+                        time,
+                        url,
+                        media_urls: mediaUrls,
+                        hashtags,
+                        mentions
                     });
                 });
                 return threads;
@@ -205,12 +270,178 @@ class ThreadsScraper:
                     "is_final": True
                 }
             }
-        except TimeoutError:
-            logger.error("Timeout waiting for threads")
-            raise
         except Exception as e:
             logger.error(f"Error getting threads: {str(e)}")
             raise
+
+    async def get_user_feed(self, username: str, max_retries: int = 3) -> Dict:
+        """
+        Get a user's feed (their posts and posts they've interacted with).
+        
+        Args:
+            username (str): Threads username
+            max_retries (int): Maximum number of retries for failed operations
+            
+        Returns:
+            Dict: List of feed posts
+        """
+        logger.info(f"Getting feed for user: {username}")
+        
+        for attempt in range(max_retries):
+            try:
+                # First ensure we're logged in
+                is_logged_in = await self.ensure_logged_in()
+                if not is_logged_in:
+                    raise Exception("Please log in first")
+                    
+                # Navigate to user's feed with retry
+                try:
+                    await self.page.goto(f'https://www.threads.net/@{username}', wait_until='domcontentloaded')
+                    logger.info("Page loaded, waiting for feed")
+                except Exception as e:
+                    logger.warning(f"Navigation failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)  # Wait before retry
+                        continue
+                    raise
+                
+                # Wait for feed content with a longer timeout
+                try:
+                    await self.page.wait_for_selector('article', timeout=10000)
+                    logger.info("Feed content loaded")
+                except TimeoutError:
+                    logger.warning("Timeout waiting for feed content, proceeding anyway")
+                
+                # Scroll multiple times to load more content
+                for _ in range(3):  # Scroll 3 times to load more content
+                    await self.page.evaluate("""() => {
+                        window.scrollTo(0, document.body.scrollHeight);
+                    }""")
+                    await asyncio.sleep(2)  # Wait for scroll to complete
+                
+                # Extract feed data with more robust selectors
+                feed = await self.page.evaluate("""() => {
+                    const feed = [];
+                    document.querySelectorAll('article').forEach(article => {
+                        try {
+                            // Get text content with fallbacks
+                            const textElement = article.querySelector('div[dir="auto"]') || 
+                                              article.querySelector('div[class*="text"]') ||
+                                              article.querySelector('div[class*="content"]');
+                            const text = textElement?.textContent?.trim() || '';
+                            
+                            // Get author with fallbacks
+                            const authorElement = article.querySelector('a[href*="/@"]') ||
+                                                article.querySelector('span[class*="username"]') ||
+                                                article.querySelector('span[class*="author"]');
+                            const author = authorElement?.textContent?.trim() || '';
+                            
+                            // Get engagement metrics with fallbacks
+                            const likes = article.querySelector('span[class*="like"]')?.textContent?.trim() || '0';
+                            const replies = article.querySelector('span[class*="reply"]')?.textContent?.trim() || '0';
+                            const reposts = article.querySelector('span[class*="repost"]')?.textContent?.trim() || '0';
+                            
+                            // Get time with fallbacks
+                            const timeElement = article.querySelector('time') ||
+                                              article.querySelector('span[class*="time"]') ||
+                                              article.querySelector('span[class*="date"]');
+                            const time = timeElement?.dateTime || timeElement?.textContent?.trim() || '';
+                            
+                            // Get URL with fallbacks
+                            const urlElement = article.querySelector('a[href*="/post/"]') ||
+                                             article.querySelector('a[href*="/thread/"]');
+                            const url = urlElement?.href || '';
+                            
+                            // Extract media URLs with better filtering
+                            const mediaUrls = [];
+                            article.querySelectorAll('img').forEach(img => {
+                                if (img.src && 
+                                    !img.src.includes('data:') && 
+                                    !img.src.includes('avatar') && 
+                                    !img.src.includes('profile')) {
+                                    mediaUrls.push(img.src);
+                                }
+                            });
+                            
+                            // Extract hashtags and mentions with better parsing
+                            const hashtags = [];
+                            const mentions = [];
+                            if (text) {
+                                const words = text.split(/\\s+/);
+                                words.forEach(word => {
+                                    if (word.startsWith('#')) {
+                                        hashtags.push(word.slice(1).replace(/[^\\w\\d]/g, ''));
+                                    } else if (word.startsWith('@')) {
+                                        mentions.push(word.slice(1).replace(/[^\\w\\d]/g, ''));
+                                    }
+                                });
+                            }
+                            
+                            // Extract thread ID from URL
+                            const threadId = url ? url.split('/').pop().split('?')[0] : '';
+                            
+                            if (text || mediaUrls.length > 0) {  // Only add if there's content
+                                feed.push({
+                                    id: threadId,
+                                    author,
+                                    text,
+                                    likes,
+                                    replies,
+                                    reposts,
+                                    time,
+                                    url,
+                                    media_urls: mediaUrls,
+                                    hashtags,
+                                    mentions
+                                });
+                            }
+                        } catch (e) {
+                            console.error('Error processing article:', e);
+                        }
+                    });
+                    return feed;
+                }""")
+                
+                if not feed:
+                    logger.warning(f"No posts found in feed (attempt {attempt + 1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
+                        continue
+                
+                # Save to database
+                self.db.save_user_threads(username, feed)
+                
+                logger.info(f"Found and saved {len(feed)} feed items")
+                
+                # Log the most recent post
+                if feed:
+                    last_post = feed[0]  # First post is the most recent
+                    logger.info(f"Most recent post in feed:")
+                    logger.info(f"Author: @{last_post['author']}")
+                    logger.info(f"Text: {last_post['text']}")
+                    logger.info(f"Likes: {last_post['likes']}")
+                    logger.info(f"Replies: {last_post['replies']}")
+                    logger.info(f"Time: {last_post['time']}")
+                else:
+                    logger.info(f"No posts found in feed")
+                
+                return {
+                    "data": {
+                        "feedData": {
+                            "posts": feed
+                        }
+                    },
+                    "extensions": {
+                        "is_final": True
+                    }
+                }
+                
+            except Exception as e:
+                logger.error(f"Error getting feed (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)
+                    continue
+                raise
 
 async def main():
     """Example usage of the ThreadsScraper."""
@@ -218,11 +449,15 @@ async def main():
         # Login (optional, only needed for private profiles)
         # await scraper.login('your_username', 'your_password')
         
-        # Get profile data
-        profile = await scraper.get_user_profile('username')
+        # Get feed for antoniwan777
+        username = "antoniwan777"
+        feed = await scraper.get_user_feed(username)
         
-        # Get threads
-        threads = await scraper.get_user_threads('username')
+        # Export to CSV
+        scraper.db.export_to_csv(username, f"{username}_feed.csv")
+        
+        # Export to Markdown
+        scraper.db.export_to_markdown(username, f"{username}_feed.md")
 
 if __name__ == '__main__':
     asyncio.run(main()) 
