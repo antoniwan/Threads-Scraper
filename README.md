@@ -1,81 +1,93 @@
-
 ## Features 🚀
 
 A Software that scrapes the following sections from threads:
 
-- Fetch user's and thread's unique identifiers.
-- Retrieve user's details, threads, and replies.
-- Retrieve thread's details and its likers.
-- Save the fetched data into CSV and JSON files.
+- Fetch user's profile information including bio, followers, and following counts
+- Retrieve user's threads with content, likes, replies, and timestamps
+- Save the fetched data into CSV and JSON files
 
 ## :file_folder: File Structure
 
-- `base_interface.py`: Provides a basic interface for interacting with Threads.
-- `threads_interface.py`: A public interface for the scraper with methods for fetching and saving data.
+- `threads_playwright.py`: Main scraper implementation using Playwright
+- `requirements.txt`: Project dependencies
 
 ## :rocket: How to Use
 
+### Installation
+
+1. Install the required dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+2. Install Playwright browsers:
+
+```bash
+playwright install
+```
+
+### Usage
+
 Example:
 
-1. Import the `ThreadsInterface` class from `threads_interface.py`.
-2. Create an instance of the `ThreadsInterface` class.
-3. Use the instance to call the methods for fetching and saving data.
+```python
+from threads_playwright import ThreadsScraper
+import asyncio
+
+async def main():
+    async with ThreadsScraper(headless=True) as scraper:
+        # Optional: Login for private profiles
+        # await scraper.login('your_username', 'your_password')
+
+        # Get profile data
+        profile = await scraper.get_user_profile('username')
+        scraper.save_to_json(profile, 'my_profile.json')
+
+        # Get threads
+        threads = await scraper.get_user_threads('username')
+        scraper.save_to_json(threads, 'my_threads.json')
+        scraper.save_to_csv(threads, 'my_threads.csv')
+
+if __name__ == '__main__':
+    asyncio.run(main())
+```
 
 ## Output
 
-1. **Scrape User ID**
-    
-    - Input: `username`
-    - Output: `user_id`
-    - Example:
-        - Input: `john_doe`
-        - Output: `12345`
-2. **Scrape Thread ID**
-    
-    - Input: `url_id` (last part of a thread's URL)
-    - Output: `thread_id`
-    - Example:
-        - Input: `CuXFPIeLLod`
-        - Output: `54321`
-3. **Fetch User**
-    
-    - Input: `user_id`
-    - Output: User information in JSON format
-    - Example:
-        - Input: `12345`
-        - Output: `{ "username": "john_doe", "email": "johndoe@example.com", "date_joined": "2022-01-01" }`
-4. **Fetch User Threads**
-    
-    - Input: `user_id`
-    - Output: List of threads posted by the user in JSON format
-    - Example:
-        - Input: `12345`
-        - Output: `[{ "thread_id": "54321", "title": "My first thread", "date_posted": "2022-02-02" }, {...}]`
-5. **Fetch User Replies**
-    
-    - Input: `user_id`
-    - Output: List of replies posted by the user in JSON format
-    - Example:
-        - Input: `12345`
-        - Output: `[{ "reply_id": "4321", "thread_id": "54321", "content": "Great thread!", "date_posted": "2022-02-03" }, {...}]`
-6. **Fetch Thread**
-    
-    - Input: `thread_id`
-    - Output: Thread information in JSON format
-    - Example:
-        - Input: `54321`
-        - Output: `{ "title": "My first thread", "content": "Hello, world!", "date_posted": "2022-02-02" }`
-7. **Fetch Thread Likers**
-    
-    - Input: `thread_id`
-    - Output: List of users who liked the thread in JSON format
-    - Example:
-        - Input: `54321`
-        - Output: `[{ "user_id": "12345", "username": "john_doe" }, {...}]`
-8. **Generate Scraper Token**
-    
-    - Input: None
-    - Output: A token for the Thread Scraper
-    - Example:
-        - Input: None
-        - Output: `abc123def456ghi789`
+1. **Profile Data**
+
+   - Input: `username`
+   - Output: JSON file with profile information
+   - Example:
+     ```json
+     {
+       "bio": "Software Developer",
+       "followers": "1.2K",
+       "following": "500"
+     }
+     ```
+
+2. **Threads Data**
+
+   - Input: `username`
+   - Output: JSON and CSV files with thread information
+   - Example:
+     ```json
+     [
+       {
+         "text": "Hello, world!",
+         "likes": "42",
+         "replies": "5",
+         "time": "2024-01-01T12:00:00Z"
+       }
+     ]
+     ```
+
+## Advantages of the New Implementation
+
+- More reliable scraping by simulating real user interactions
+- Better handling of dynamic content
+- No dependency on internal API endpoints
+- Automatic handling of rate limiting and anti-bot measures
+- Support for both public and private profiles (with login)
