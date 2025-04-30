@@ -1,30 +1,46 @@
-from threads_interface import ThreadsInterface
+import asyncio
+import logging
+from threads_playwright import ThreadsScraper
 
-# Initialize the interface
-ti = ThreadsInterface()
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Enter your Threads username (without the @)
-username = "antoniwan777"  # <-- Replace with your username
+async def main():
+    """Example usage of the ThreadsScraper."""
+    try:
+        # Initialize the scraper with visible browser
+        logger.info("Initializing Threads scraper")
+        async with ThreadsScraper(headless=False) as scraper:
+            # Check login status and wait for manual login if needed
+            is_logged_in = await scraper.ensure_logged_in()
+            if not is_logged_in:
+                logger.info("Please log in to Threads in the browser window")
+                input("Press Enter after you've logged in...")
+                
+                # Verify login again
+                is_logged_in = await scraper.ensure_logged_in()
+                if not is_logged_in:
+                    logger.error("Still not logged in. Please try again.")
+                    return
+            
+            # Get profile data for a user
+            username = "zuck"  # Example username
+            logger.info(f"Fetching profile for @{username}")
+            profile = await scraper.get_user_profile(username)
+            print(f"Profile data: {profile}")
+            
+            # Get threads for the same user
+            logger.info(f"Fetching threads for @{username}")
+            threads = await scraper.get_user_threads(username)
+            print(f"Threads data: {threads}")
+            
+    except Exception as e:
+        logger.error(f"An error occurred: {str(e)}")
+        raise
 
-# Get your user ID
-user_id = ti.retrieve_user_id(username)
-print(f"User ID: {user_id}")
-
-# Fetch your profile details
-profile = ti.retrieve_user(user_id)
-print("Profile:", profile)
-
-# Fetch your threads (posts)
-threads = ti.retrieve_user_threads(user_id)
-print("Threads:", threads)
-
-# Fetch your replies
-replies = ti.retrieve_user_replies(user_id)
-print("Replies:", replies)
-
-# Save the data to files
-ti.save_data_to_json(profile, "my_profile.json")
-ti.save_data_to_json(threads, "my_threads.json")
-ti.save_data_to_json(replies, "my_replies.json")
-ti.save_data_to_csv(threads, "my_threads.csv")
-ti.save_data_to_csv(replies, "my_replies.csv")
+if __name__ == '__main__':
+    asyncio.run(main())
