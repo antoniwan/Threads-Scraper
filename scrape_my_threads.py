@@ -1,77 +1,122 @@
 import asyncio
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from threads_playwright import ThreadsScraper
+from config import get_settings
+
+# Get settings
+settings = get_settings()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=getattr(logging, settings["logging_settings"]["level"]),
+    format=settings["logging_settings"]["format"],
     handlers=[
-        logging.FileHandler('threads_scraper.log'),
+        logging.FileHandler(settings["logging_settings"]["log_file"]),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
+async def scrape_with_retry(
+    username: str = settings["scraping_settings"]["username"],
+    max_retries: int = settings["scraping_settings"]["max_retries"],
+    retry_delay: int = settings["scraping_settings"]["retry_delay"]
+) -> Optional[dict]:
+    """
+    Scrape Threads data with retry mechanism.
+    
+    Args:
+        username: Threads username to scrape
+        max_retries: Maximum number of retry attempts
+        retry_delay: Delay between retries in seconds
+        
+    Returns:
+        Scraped feed data or None if all retries failed
+    """
+    scraper = None
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Attempt {attempt + 1}/{max_retries}")
+            
+            # Initialize scraper with settings
+            logger.info("Initializing Threads scraper...")
+            scraper = ThreadsScraper(
+                headless=settings["browser_settings"]["headless"],
+                db_path=str(settings["db_path"])
+            )
+            
+            # Check login status
+            logger.info("Checking login status...")
+            is_logged_in = await scraper.ensure_logged_in()
+            if not is_logged_in:
+                logger.error("Login failed. Please try again.")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    continue
+                return None
+            
+            # Get user feed
+            logger.info(f"Fetching feed for user: {username}")
+            feed_data = await scraper.get_user_feed(username)
+            
+            if not feed_data or not feed_data.get('data', {}).get('feedData', {}).get('posts'):
+                logger.warning("No feed data found")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    continue
+                return None
+            
+            return feed_data
+            
+        except Exception as e:
+            logger.error(f"Error during scraping (attempt {attempt + 1}/{max_retries}): {str(e)}")
+            if attempt < max_retries - 1:
+                logger.info(f"Retrying in {retry_delay} seconds...")
+                await asyncio.sleep(retry_delay)
+                continue
+            return None
+            
+        finally:
+            if scraper:
+                try:
+                    await scraper.cleanup()
+                    logger.info("Scraper closed successfully")
+                except Exception as e:
+                    logger.error(f"Error during cleanup: {str(e)}")
+
 async def main():
     """Main function to scrape Threads data."""
-    scraper = None
     try:
-        # Initialize scraper
-        logger.info("Initializing Threads scraper...")
-        scraper = ThreadsScraper()
+        # Get user feed with retries
+        username = settings["scraping_settings"]["username"]
+        feed_data = await scrape_with_retry(username)
         
-        # Check login status
-        logger.info("Checking login status...")
-        is_logged_in = await scraper.ensure_logged_in()
-        if not is_logged_in:
-            logger.error("Login failed. Please try again.")
+        if not feed_data:
+            logger.error("Failed to scrape feed after all retries")
             return
-        
-        # Get user feed
-        username = "antoniwan777"  # Your Threads username
-        logger.info(f"Fetching feed for user: {username}")
-        feed_data = await scraper.get_user_feed(username)
-        
-        if not feed_data or not feed_data.get('data', {}).get('feedData', {}).get('posts'):
-            logger.warning("No feed data found")
-            return
-        
-        # Create output directory if it doesn't exist
-        output_dir = Path("output")
-        output_dir.mkdir(exist_ok=True)
         
         # Generate timestamp for filenames
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime(settings["export_settings"]["date_format"])
         
         # Export to CSV
-        csv_path = output_dir / f"threads_feed_{timestamp}.csv"
+        csv_path = settings["output_dir"] / f"threads_feed_{timestamp}.csv"
         logger.info(f"Exporting feed to CSV: {csv_path}")
         scraper.db.export_to_csv(username, str(csv_path))
         
         # Export to Markdown
-        md_path = output_dir / f"threads_feed_{timestamp}.md"
+        md_path = settings["output_dir"] / f"threads_feed_{timestamp}.md"
         logger.info(f"Exporting feed to Markdown: {md_path}")
         scraper.db.export_to_markdown(username, str(md_path))
         
         logger.info("Scraping completed successfully")
         
     except Exception as e:
-        logger.error(f"Error during scraping: {str(e)}")
+        logger.error(f"Fatal error during scraping: {str(e)}")
         raise
-        
-    finally:
-        # Cleanup
-        if scraper:
-            try:
-                await scraper.close()
-                logger.info("Scraper closed successfully")
-            except Exception as e:
-                logger.error(f"Error during cleanup: {str(e)}")
 
 if __name__ == "__main__":
     try:

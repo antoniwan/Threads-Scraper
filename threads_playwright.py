@@ -35,32 +35,42 @@ class ThreadsScraper:
     async def __aenter__(self):
         """Context manager entry."""
         logger.info("Starting Playwright browser")
-        self.playwright = await async_playwright().start()
-        
-        # Create a new context with persistent storage
-        self.context = await self.playwright.chromium.launch_persistent_context(
-            user_data_dir="./user_data",
-            headless=self.headless,
-            args=['--disable-blink-features=AutomationControlled']
-        )
-        
-        self.browser = self.context.browser
-        self.page = self.context.pages[0]
-        
-        return self
+        try:
+            self.playwright = await async_playwright().start()
+            
+            # Create a new context with persistent storage
+            self.context = await self.playwright.chromium.launch_persistent_context(
+                user_data_dir="./user_data",
+                headless=self.headless,
+                args=['--disable-blink-features=AutomationControlled']
+            )
+            
+            self.browser = self.context.browser
+            self.page = self.context.pages[0]
+            
+            return self
+        except Exception as e:
+            logger.error(f"Error during browser initialization: {str(e)}")
+            await self.cleanup()
+            raise
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
+        await self.cleanup()
+        
+    async def cleanup(self):
+        """Clean up browser resources."""
         try:
-            if self.context:
+            if hasattr(self, 'context') and self.context:
                 await self.context.close()
-            if self.playwright:
+            if hasattr(self, 'playwright') and self.playwright:
                 await self.playwright.stop()
         except Exception as e:
             logger.error(f"Error during cleanup: {str(e)}")
         finally:
-            self.db.close()
-
+            if hasattr(self, 'db'):
+                self.db.close()
+                
     async def ensure_logged_in(self) -> bool:
         """
         Ensure we are logged in to Threads.

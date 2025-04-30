@@ -42,21 +42,63 @@ class ThreadsDatabase:
                 cursor.execute("PRAGMA table_info(threads)")
                 columns = [col[1] for col in cursor.fetchall()]
                 
-                # Add missing columns with proper types and constraints
-                if 'thread_id' not in columns:
-                    cursor.execute("ALTER TABLE threads ADD COLUMN thread_id TEXT UNIQUE")
-                if 'reposts' not in columns:
-                    cursor.execute("ALTER TABLE threads ADD COLUMN reposts TEXT DEFAULT '0'")
-                if 'url' not in columns:
-                    cursor.execute("ALTER TABLE threads ADD COLUMN url TEXT")
-                if 'media_urls' not in columns:
-                    cursor.execute("ALTER TABLE threads ADD COLUMN media_urls TEXT DEFAULT '[]'")
-                if 'hashtags' not in columns:
-                    cursor.execute("ALTER TABLE threads ADD COLUMN hashtags TEXT DEFAULT '[]'")
-                if 'mentions' not in columns:
-                    cursor.execute("ALTER TABLE threads ADD COLUMN mentions TEXT DEFAULT '[]'")
+                # If any required columns are missing, recreate the table
+                required_columns = {'thread_id', 'reposts', 'url', 'media_urls', 'hashtags', 'mentions'}
+                if not all(col in columns for col in required_columns):
+                    logger.info("Recreating threads table with updated schema")
+                    
+                    # Create temporary table with new schema
+                    cursor.execute("""
+                    CREATE TABLE threads_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT NOT NULL,
+                        thread_id TEXT UNIQUE,
+                        text TEXT,
+                        likes TEXT DEFAULT '0',
+                        replies TEXT DEFAULT '0',
+                        reposts TEXT DEFAULT '0',
+                        time TEXT,
+                        url TEXT,
+                        media_urls TEXT DEFAULT '[]',
+                        hashtags TEXT DEFAULT '[]',
+                        mentions TEXT DEFAULT '[]',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+                    )
+                    """)
+                    
+                    # Copy data from old table to new table
+                    cursor.execute("""
+                    INSERT INTO threads_new (
+                        id, username, text, likes, replies, time, created_at
+                    )
+                    SELECT 
+                        id, username, text, likes, replies, time, created_at
+                    FROM threads
+                    """)
+                    
+                    # Drop old table and rename new one
+                    cursor.execute("DROP TABLE threads")
+                    cursor.execute("ALTER TABLE threads_new RENAME TO threads")
+                    
+                    # Create indexes
+                    cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_threads_username ON threads(username)
+                    """)
+                    cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_threads_thread_id ON threads(thread_id)
+                    """)
+                    cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_threads_created_at ON threads(created_at)
+                    """)
+                    
+                    self.conn.commit()
+                    logger.info("Threads table schema updated successfully")
+            else:
+                # Table doesn't exist, create it with full schema
+                self.create_tables()
                 
-                self.conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Schema update error: {str(e)}")
             self.conn.rollback()
