@@ -3,6 +3,9 @@ Provide a basic interface for the Threads.
 """
 import re
 import requests
+import logging
+
+logger = logging.getLogger(__name__)
 
 class BaseThreadsInterface:
     """
@@ -46,15 +49,29 @@ class BaseThreadsInterface:
         Returns:
             The user's unique identifier as an integer.
         """
-        response = requests.get(
-            url=f'https://www.instagram.com/{username}',
-            headers=self.headers_for_html_fetching,
-        )
+        logger.info(f"Retrieving user ID for username: {username}")
+        try:
+            response = requests.get(
+                url=f'https://www.instagram.com/{username}',
+                headers=self.headers_for_html_fetching,
+            )
+            response.raise_for_status()
 
-        user_id_key_value = re.search('"user_id":"(\\d+)",', response.text).group()
-        user_id = re.search('\\d+', user_id_key_value).group()
-
-        return int(user_id)
+            user_id_key_value = re.search('"user_id":"(\\d+)",', response.text)
+            if not user_id_key_value:
+                logger.error(f"Could not find user_id in response for username: {username}")
+                raise ValueError("Could not find user_id in response")
+                
+            user_id = re.search('\\d+', user_id_key_value.group()).group()
+            logger.info(f"Successfully retrieved user ID: {user_id} for username: {username}")
+            return int(user_id)
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to retrieve user ID for username {username}: {str(e)}")
+            raise
+        except (AttributeError, IndexError) as e:
+            logger.error(f"Failed to parse user ID from response for username {username}: {str(e)}")
+            raise ValueError("Failed to parse user ID from response")
 
     def retrieve_thread_id(self, url_id: str) -> int:
         """
@@ -66,6 +83,7 @@ class BaseThreadsInterface:
         Returns:
             The thread's unique identifier as an integer.
         """
+        logger.info(f"Converting URL ID to thread ID: {url_id}")
         alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
 
         thread_id = 0
@@ -73,4 +91,5 @@ class BaseThreadsInterface:
         for character in url_id:
             thread_id = (thread_id * 64) + alphabet.index(character)
 
+        logger.info(f"Successfully converted URL ID {url_id} to thread ID: {thread_id}")
         return thread_id
