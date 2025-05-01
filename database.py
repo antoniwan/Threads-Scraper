@@ -54,49 +54,33 @@ class ThreadsDatabase:
                         username TEXT NOT NULL,
                         thread_id TEXT UNIQUE,
                         text TEXT,
-                        likes TEXT DEFAULT '0',
-                        replies TEXT DEFAULT '0',
-                        reposts TEXT DEFAULT '0',
-                        time TEXT,
+                        timestamp TEXT,
+                        likes INTEGER,
+                        replies INTEGER,
+                        reposts INTEGER,
                         url TEXT,
-                        media_urls TEXT DEFAULT '[]',
-                        hashtags TEXT DEFAULT '[]',
-                        mentions TEXT DEFAULT '[]',
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+                        media_urls TEXT,
+                        hashtags TEXT,
+                        mentions TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                     """)
                     
                     # Copy data from old table to new table
                     cursor.execute("""
-                    INSERT INTO threads_new (
-                        id, username, text, likes, replies, time, created_at
-                    )
-                    SELECT 
-                        id, username, text, likes, replies, time, created_at
+                    INSERT INTO threads_new (username, text, timestamp, likes, replies, created_at)
+                    SELECT username, text, timestamp, likes, replies, created_at
                     FROM threads
                     """)
                     
-                    # Drop old table and rename new one
+                    # Drop old table and rename new table
                     cursor.execute("DROP TABLE threads")
                     cursor.execute("ALTER TABLE threads_new RENAME TO threads")
                     
-                    # Create indexes
-                    cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_threads_username ON threads(username)
-                    """)
-                    cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_threads_thread_id ON threads(thread_id)
-                    """)
-                    cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_threads_created_at ON threads(created_at)
-                    """)
-                    
                     self.conn.commit()
-                    logger.info("Threads table schema updated successfully")
+                    logger.info("Schema update completed successfully")
             else:
-                # Table doesn't exist, create it with full schema
+                # Table doesn't exist, create it with the new schema
                 self.create_tables()
                 
         except sqlite3.Error as e:
@@ -105,18 +89,19 @@ class ThreadsDatabase:
             raise
         
     def create_tables(self):
-        """Create necessary tables if they don't exist."""
+        """Create the necessary tables if they don't exist."""
         cursor = self.conn.cursor()
         
         try:
-            # Create users table with proper constraints
+            # Create users table
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 username TEXT PRIMARY KEY,
+                full_name TEXT,
                 bio TEXT,
-                followers TEXT,
-                following TEXT,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                followers_count INTEGER,
+                following_count INTEGER,
+                is_private BOOLEAN,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """)
@@ -128,16 +113,15 @@ class ThreadsDatabase:
                 username TEXT NOT NULL,
                 thread_id TEXT UNIQUE,
                 text TEXT,
-                likes TEXT DEFAULT '0',
-                replies TEXT DEFAULT '0',
-                reposts TEXT DEFAULT '0',
-                time TEXT,
+                timestamp TEXT,
+                likes INTEGER,
+                replies INTEGER,
+                reposts INTEGER,
                 url TEXT,
-                media_urls TEXT DEFAULT '[]',
-                hashtags TEXT DEFAULT '[]',
-                mentions TEXT DEFAULT '[]',
+                media_urls TEXT,
+                hashtags TEXT,
+                mentions TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
             )
             """)

@@ -37,56 +37,28 @@ async def scrape_with_retry(
     Returns:
         Scraped feed data or None if all retries failed
     """
-    scraper = None
     for attempt in range(max_retries):
         try:
             logger.info(f"Attempt {attempt + 1}/{max_retries}")
             
             # Initialize scraper with settings
             logger.info("Initializing Threads scraper...")
-            scraper = ThreadsScraper(
+            async with ThreadsScraper(
                 headless=settings["browser_settings"]["headless"],
                 db_path=str(settings["db_path"])
-            )
-            
-            # Check login status
-            logger.info("Checking login status...")
-            is_logged_in = await scraper.ensure_logged_in()
-            if not is_logged_in:
-                logger.error("Login failed. Please try again.")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                    continue
-                return None
-            
-            # Get user feed
-            logger.info(f"Fetching feed for user: {username}")
-            feed_data = await scraper.get_user_feed(username)
-            
-            if not feed_data or not feed_data.get('data', {}).get('feedData', {}).get('posts'):
-                logger.warning("No feed data found")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                    continue
-                return None
-            
-            return feed_data
-            
+            ) as scraper:
+                # Get user feed
+                feed = await scraper.get_user_feed(username)
+                return feed
+                
         except Exception as e:
-            logger.error(f"Error during scraping (attempt {attempt + 1}/{max_retries}): {str(e)}")
+            logger.error(f"Error during scraping: {str(e)}")
             if attempt < max_retries - 1:
                 logger.info(f"Retrying in {retry_delay} seconds...")
                 await asyncio.sleep(retry_delay)
-                continue
-            return None
-            
-        finally:
-            if scraper:
-                try:
-                    await scraper.cleanup()
-                    logger.info("Scraper closed successfully")
-                except Exception as e:
-                    logger.error(f"Error during cleanup: {str(e)}")
+            else:
+                logger.error("Failed to scrape feed after all retries")
+                return None
 
 async def main():
     """Main function to scrape Threads data."""

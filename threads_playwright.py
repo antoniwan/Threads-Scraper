@@ -46,7 +46,7 @@ class ThreadsScraper:
             )
             
             self.browser = self.context.browser
-            self.page = self.context.pages[0]
+            self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
             
             return self
         except Exception as e:
@@ -61,6 +61,8 @@ class ThreadsScraper:
     async def cleanup(self):
         """Clean up browser resources."""
         try:
+            if hasattr(self, 'page') and self.page and not self.page.is_closed():
+                await self.page.close()
             if hasattr(self, 'context') and self.context:
                 await self.context.close()
             if hasattr(self, 'playwright') and self.playwright:
@@ -92,14 +94,6 @@ class ThreadsScraper:
             return True
         except Exception as e:
             logger.error(f"Error checking login status: {str(e)}")
-            # If we get an error but the page is still loaded, check the URL
-            try:
-                current_url = self.page.url
-                if 'instagram.com' not in current_url and 'login' not in current_url:
-                    logger.info("Appears to be logged in despite navigation error")
-                    return True
-            except:
-                pass
             return False
             
     async def get_user_profile(self, username: str) -> Dict:
@@ -317,17 +311,28 @@ class ThreadsScraper:
                 
                 # Wait for feed content with a longer timeout
                 try:
-                    await self.page.wait_for_selector('article', timeout=10000)
+                    await self.page.wait_for_selector('article', timeout=20000)  # Increased timeout
                     logger.info("Feed content loaded")
                 except TimeoutError:
                     logger.warning("Timeout waiting for feed content, proceeding anyway")
                 
                 # Scroll multiple times to load more content
-                for _ in range(3):  # Scroll 3 times to load more content
+                for scroll_attempt in range(5):  # Increased scroll attempts
+                    logger.info(f"Scroll attempt {scroll_attempt + 1}/5")
                     await self.page.evaluate("""() => {
                         window.scrollTo(0, document.body.scrollHeight);
                     }""")
-                    await asyncio.sleep(2)  # Wait for scroll to complete
+                    await asyncio.sleep(3)  # Increased wait time between scrolls
+                    
+                    # Check if we have content after each scroll
+                    content = await self.page.evaluate("""() => {
+                        const articles = document.querySelectorAll('article');
+                        return articles.length > 0;
+                    }""")
+                    
+                    if content:
+                        logger.info("Found content after scroll")
+                        break
                 
                 # Extract feed data with more robust selectors
                 feed = await self.page.evaluate("""() => {
