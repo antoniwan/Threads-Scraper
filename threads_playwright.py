@@ -113,8 +113,19 @@ class ThreadsScraper:
             if not is_logged_in:
                 raise Exception("Please log in first")
                 
-            # Navigate to profile with a more lenient wait condition
-            await self.page.goto(f'https://www.threads.net/@{username}', wait_until='domcontentloaded')
+            # Only navigate if not already on the correct profile page
+            current_url = self.page.url
+            expected_url_net = f"https://www.threads.net/@{username}"
+            expected_url_com = f"https://www.threads.com/@{username}"
+            if not (current_url.startswith(expected_url_net) or current_url.startswith(expected_url_com)):
+                try:
+                    await self.page.goto(expected_url_net, wait_until='domcontentloaded')
+                    logger.info("Navigated to profile page")
+                except Exception as e:
+                    logger.warning(f"Navigation to profile failed: {str(e)}")
+            else:
+                logger.info("Already on the correct profile page, skipping navigation")
+            
             logger.info("Page loaded, waiting for profile data")
             
             # Wait for either main content or a reasonable timeout
@@ -201,7 +212,20 @@ class ThreadsScraper:
             threads = await self.page.evaluate("""() => {
                 const threads = [];
                 document.querySelectorAll('article').forEach(article => {
-                    const text = article.querySelector('div[dir="auto"]')?.textContent;
+                    const textDivs = article.querySelectorAll('div[dir="auto"]');
+                    let text = '';
+                    for (let div of textDivs) {
+                        if (div.textContent && div.textContent.trim().length > 0) {
+                            text = div.textContent.trim();
+                            break; // Use the first non-empty one
+                        }
+                    }
+                    // Fallbacks
+                    if (!text) {
+                        const p = article.querySelector('p');
+                        if (p && p.textContent.trim().length > 0) text = p.textContent.trim();
+                    }
+                    
                     const likes = article.querySelector('span[class*="like"]')?.textContent;
                     const replies = article.querySelector('span[class*="reply"]')?.textContent;
                     const reposts = article.querySelector('span[class*="repost"]')?.textContent;
@@ -278,190 +302,104 @@ class ThreadsScraper:
             logger.error(f"Error getting threads: {str(e)}")
             raise
 
+    async def scroll_until_no_more_posts(self, wait_time: float = 2.5, max_scrolls: int = 50):
+        """Scrolls until no new posts are loaded or max_scrolls is reached."""
+        last_count = 0
+        for i in range(max_scrolls):
+            count = await self.page.evaluate("document.querySelectorAll('article').length")
+            if count == last_count:
+                logger.info(f"No new posts loaded after {i} scrolls. Stopping.")
+                break
+            logger.info(f"Scrolling for more posts ({i+1}), found {count} posts so far.")
+            last_count = count
+            await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+            await asyncio.sleep(wait_time)
+
     async def get_user_feed(self, username: str, max_retries: int = 3) -> Dict:
         """
         Get a user's feed (their posts and posts they've interacted with).
-        
-        Args:
-            username (str): Threads username
-            max_retries (int): Maximum number of retries for failed operations
-            
-        Returns:
-            Dict: List of feed posts
         """
         logger.info(f"Getting feed for user: {username}")
-        
+
         for attempt in range(max_retries):
             try:
-                # First ensure we're logged in
-                is_logged_in = await self.ensure_logged_in()
-                if not is_logged_in:
+                if not await self.ensure_logged_in():
                     raise Exception("Please log in first")
-                    
-                # Navigate to user's feed with retry
-                try:
-                    await self.page.goto(f'https://www.threads.net/@{username}', wait_until='domcontentloaded')
-                    logger.info("Page loaded, checking for feed content")
-                except Exception as e:
-                    logger.warning(f"Navigation failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(2)  # Wait before retry
-                        continue
-                    raise
-                
-                # Check if we are on the correct URL
-                current_url = self.page.url
-                expected_url = f"https://www.threads.net/@{username}"
-                if not current_url.startswith(expected_url):
-                    logger.warning(f"Unexpected URL after navigation: {current_url}")
 
-                # Immediately check for posts
-                articles_present = await self.page.evaluate("""() => !!document.querySelector('article')""")
-                if not articles_present:
-                    logger.info("No posts found immediately, waiting for feed content")
-                    try:
-                        await self.page.wait_for_selector('article', timeout=20000)
-                        logger.info("Feed content loaded after wait")
-                    except TimeoutError:
-                        logger.warning("Timeout waiting for feed content, proceeding anyway")
-                else:
-                    logger.info("Feed content found immediately, proceeding to scrape")
-                
-                # Scroll multiple times to load more content
-                for scroll_attempt in range(5):  # Increased scroll attempts
-                    logger.info(f"Scroll attempt {scroll_attempt + 1}/5")
-                    await self.page.evaluate("""() => {
-                        window.scrollTo(0, document.body.scrollHeight);
-                    }""")
-                    await asyncio.sleep(3)  # Increased wait time between scrolls
-                    
-                    # Check if we have content after each scroll
-                    content = await self.page.evaluate("""() => {
-                        const articles = document.querySelectorAll('article');
-                        return articles.length > 0;
-                    }""")
-                    
-                    if content:
-                        logger.info("Found content after scroll")
-                        break
-                
-                # Extract feed data with more robust selectors
-                feed = await self.page.evaluate("""() => {
+                # Only navigate if not already on the correct profile page
+                expected_urls = [f"https://www.threads.net/@{username}", f"https://www.threads.com/@{username}"]
+                if not any(self.page.url.startswith(url) for url in expected_urls):
+                    await self.page.goto(expected_urls[0], wait_until='domcontentloaded')
+                    logger.info("Navigated to profile page")
+
+                # Wait for posts to appear
+                try:
+                    await self.page.wait_for_selector('article', timeout=10000)
+                except TimeoutError:
+                    logger.warning("Timeout waiting for posts, proceeding to scroll")
+
+                # Scroll until no more new posts are loaded
+                await self.scroll_until_no_more_posts()
+
+                # Extract posts
+                feed = await self.page.evaluate(r"""() => {
                     const feed = [];
                     document.querySelectorAll('article').forEach(article => {
                         try {
-                            // Get text content with fallbacks
-                            const textElement = article.querySelector('div[dir="auto"]') || 
-                                              article.querySelector('div[class*="text"]') ||
-                                              article.querySelector('div[class*="content"]');
-                            const text = textElement?.textContent?.trim() || '';
-                            
-                            // Get author with fallbacks
-                            const authorElement = article.querySelector('a[href*="/@"]') ||
-                                                article.querySelector('span[class*="username"]') ||
-                                                article.querySelector('span[class*="author"]');
-                            const author = authorElement?.textContent?.trim() || '';
-                            
-                            // Get engagement metrics with fallbacks
-                            const likes = article.querySelector('span[class*="like"]')?.textContent?.trim() || '0';
-                            const replies = article.querySelector('span[class*="reply"]')?.textContent?.trim() || '0';
-                            const reposts = article.querySelector('span[class*="repost"]')?.textContent?.trim() || '0';
-                            
-                            // Get time with fallbacks
-                            const timeElement = article.querySelector('time') ||
-                                              article.querySelector('span[class*="time"]') ||
-                                              article.querySelector('span[class*="date"]');
-                            const time = timeElement?.dateTime || timeElement?.textContent?.trim() || '';
-                            
-                            // Get URL with fallbacks
-                            const urlElement = article.querySelector('a[href*="/post/"]') ||
-                                             article.querySelector('a[href*="/thread/"]');
-                            const url = urlElement?.href || '';
-                            
-                            // Extract media URLs with better filtering
-                            const mediaUrls = [];
-                            article.querySelectorAll('img').forEach(img => {
-                                if (img.src && 
-                                    !img.src.includes('data:') && 
-                                    !img.src.includes('avatar') && 
-                                    !img.src.includes('profile')) {
-                                    mediaUrls.push(img.src);
+                            const textDivs = article.querySelectorAll('div[dir=\"auto\"]');
+                            let text = '';
+                            for (let div of textDivs) {
+                                if (div.textContent && div.textContent.trim().length > 0) {
+                                    text = div.textContent.trim();
+                                    break;
                                 }
-                            });
-                            
-                            // Extract hashtags and mentions with better parsing
+                            }
+                            if (!text) {
+                                const p = article.querySelector('p');
+                                if (p && p.textContent.trim().length > 0) text = p.textContent.trim();
+                            }
+                            const author = article.querySelector('a[href*=\"/@\"]')?.textContent?.trim() || '';
+                            const likes = article.querySelector('span[class*=\"like\"]')?.textContent?.trim() || '0';
+                            const replies = article.querySelector('span[class*=\"reply\"]')?.textContent?.trim() || '0';
+                            const reposts = article.querySelector('span[class*=\"repost\"]')?.textContent?.trim() || '0';
+                            const time = article.querySelector('time')?.dateTime || '';
+                            const url = article.querySelector('a[href*=\"/post/\"]')?.href || '';
+                            const mediaUrls = Array.from(article.querySelectorAll('img'))
+                                .map(img => img.src)
+                                .filter(src => src && !src.includes('data:') && !src.includes('avatar') && !src.includes('profile'));
                             const hashtags = [];
                             const mentions = [];
                             if (text) {
-                                const words = text.split(/\\s+/);
-                                words.forEach(word => {
-                                    if (word.startsWith('#')) {
-                                        hashtags.push(word.slice(1).replace(/[^\\w\\d]/g, ''));
-                                    } else if (word.startsWith('@')) {
-                                        mentions.push(word.slice(1).replace(/[^\\w\\d]/g, ''));
-                                    }
+                                text.split(/\s+/).forEach(word => {
+                                    if (word.startsWith('#')) hashtags.push(word.slice(1));
+                                    if (word.startsWith('@')) mentions.push(word.slice(1));
                                 });
                             }
-                            
-                            // Extract thread ID from URL
                             const threadId = url ? url.split('/').pop().split('?')[0] : '';
-                            
-                            if (text || mediaUrls.length > 0) {  // Only add if there's content
+                            if (text || mediaUrls.length > 0) {
                                 feed.push({
-                                    id: threadId,
-                                    author,
-                                    text,
-                                    likes,
-                                    replies,
-                                    reposts,
-                                    time,
-                                    url,
-                                    media_urls: mediaUrls,
-                                    hashtags,
-                                    mentions
+                                    id: threadId, author, text, likes, replies, reposts, time, url,
+                                    media_urls: mediaUrls, hashtags, mentions
                                 });
                             }
-                        } catch (e) {
-                            console.error('Error processing article:', e);
-                        }
+                        } catch (e) {}
                     });
                     return feed;
                 }""")
-                
+
                 if not feed:
                     logger.warning(f"No posts found in feed (attempt {attempt + 1}/{max_retries})")
                     if attempt < max_retries - 1:
                         await asyncio.sleep(2)
                         continue
-                
-                # Save to database
+
                 self.db.save_user_threads(username, feed)
-                
                 logger.info(f"Found and saved {len(feed)} feed items")
-                
-                # Log the most recent post
-                if feed:
-                    last_post = feed[0]  # First post is the most recent
-                    logger.info(f"Most recent post in feed:")
-                    logger.info(f"Author: @{last_post['author']}")
-                    logger.info(f"Text: {last_post['text']}")
-                    logger.info(f"Likes: {last_post['likes']}")
-                    logger.info(f"Replies: {last_post['replies']}")
-                    logger.info(f"Time: {last_post['time']}")
-                else:
-                    logger.info(f"No posts found in feed")
-                
                 return {
-                    "data": {
-                        "feedData": {
-                            "posts": feed
-                        }
-                    },
-                    "extensions": {
-                        "is_final": True
-                    }
+                    "data": {"feedData": {"posts": feed}},
+                    "extensions": {"is_final": True}
                 }
-                
+
             except Exception as e:
                 logger.error(f"Error getting feed (attempt {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
