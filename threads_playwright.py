@@ -301,7 +301,7 @@ class ThreadsScraper:
                 # Navigate to user's feed with retry
                 try:
                     await self.page.goto(f'https://www.threads.net/@{username}', wait_until='domcontentloaded')
-                    logger.info("Page loaded, waiting for feed")
+                    logger.info("Page loaded, checking for feed content")
                 except Exception as e:
                     logger.warning(f"Navigation failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
                     if attempt < max_retries - 1:
@@ -309,12 +309,23 @@ class ThreadsScraper:
                         continue
                     raise
                 
-                # Wait for feed content with a longer timeout
-                try:
-                    await self.page.wait_for_selector('article', timeout=20000)  # Increased timeout
-                    logger.info("Feed content loaded")
-                except TimeoutError:
-                    logger.warning("Timeout waiting for feed content, proceeding anyway")
+                # Check if we are on the correct URL
+                current_url = self.page.url
+                expected_url = f"https://www.threads.net/@{username}"
+                if not current_url.startswith(expected_url):
+                    logger.warning(f"Unexpected URL after navigation: {current_url}")
+
+                # Immediately check for posts
+                articles_present = await self.page.evaluate("""() => !!document.querySelector('article')""")
+                if not articles_present:
+                    logger.info("No posts found immediately, waiting for feed content")
+                    try:
+                        await self.page.wait_for_selector('article', timeout=20000)
+                        logger.info("Feed content loaded after wait")
+                    except TimeoutError:
+                        logger.warning("Timeout waiting for feed content, proceeding anyway")
+                else:
+                    logger.info("Feed content found immediately, proceeding to scrape")
                 
                 # Scroll multiple times to load more content
                 for scroll_attempt in range(5):  # Increased scroll attempts
