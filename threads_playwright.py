@@ -96,6 +96,29 @@ class ThreadsScraper:
             logger.error(f"Error checking login status: {str(e)}")
             return False
             
+    async def goto_and_validate_profile(self, username: str) -> bool:
+        """
+        Navigate to the user's profile and ensure we are on the correct page.
+        Returns True if on the correct profile page, False otherwise.
+        """
+        expected_urls = [f"https://www.threads.net/@{username}", f"https://www.threads.com/@{username}"]
+        try:
+            if not any(self.page.url.startswith(url) for url in expected_urls):
+                await self.page.goto(expected_urls[0], wait_until='domcontentloaded')
+                logger.info(f"Navigated to profile page for @{username}")
+            else:
+                logger.info(f"Already on the correct profile page for @{username}, skipping navigation")
+            # Wait for main content
+            await self.page.wait_for_selector('main', timeout=10000)
+        except TimeoutError:
+            logger.warning("Timeout waiting for main content, proceeding anyway")
+        # Check for unexpected redirect
+        current_url = self.page.url
+        if not any(current_url.startswith(url) for url in expected_urls):
+            logger.error(f"Unexpected redirect! Now at: {current_url} (expected one of: {expected_urls})")
+            return False
+        return True
+
     async def get_user_profile(self, username: str) -> Dict:
         """
         Get a user's profile information.
@@ -108,59 +131,32 @@ class ThreadsScraper:
         """
         logger.info(f"Getting profile for user: {username}")
         try:
-            # First ensure we're logged in
             is_logged_in = await self.ensure_logged_in()
             if not is_logged_in:
                 raise Exception("Please log in first")
-                
-            # Only navigate if not already on the correct profile page
-            current_url = self.page.url
-            expected_url_net = f"https://www.threads.net/@{username}"
-            expected_url_com = f"https://www.threads.com/@{username}"
-            if not (current_url.startswith(expected_url_net) or current_url.startswith(expected_url_com)):
-                try:
-                    await self.page.goto(expected_url_net, wait_until='domcontentloaded')
-                    logger.info("Navigated to profile page")
-                except Exception as e:
-                    logger.warning(f"Navigation to profile failed: {str(e)}")
-            else:
-                logger.info("Already on the correct profile page, skipping navigation")
-            
+            # Use helper to navigate and validate
+            if not await self.goto_and_validate_profile(username):
+                raise Exception("Failed to reach the correct profile page. Possible redirect or session issue.")
             logger.info("Page loaded, waiting for profile data")
-            
-            # Wait for either main content or a reasonable timeout
-            try:
-                await self.page.wait_for_selector('main', timeout=10000)
-                logger.info("Main content loaded")
-            except TimeoutError:
-                logger.warning("Timeout waiting for main content, proceeding anyway")
-            
             # Extract profile data from the page
             profile_data = await self.page.evaluate("""() => {
                 const data = {};
-                
                 // Try different selectors for bio
                 const bio = document.querySelector('h1')?.nextElementSibling?.textContent || 
-                           document.querySelector('div[dir="auto"]')?.textContent;
-                
+                           document.querySelector('div[dir=\"auto\"]')?.textContent;
                 // Try different selectors for followers/following
-                const followers = document.querySelector('a[href*="/followers"]')?.textContent ||
-                                document.querySelector('span[class*="followers"]')?.textContent ||
-                                document.querySelector('span[class*="follower"]')?.textContent;
-                
-                const following = document.querySelector('a[href*="/following"]')?.textContent ||
-                                document.querySelector('span[class*="following"]')?.textContent ||
-                                document.querySelector('span[class*="follow"]')?.textContent;
-                
+                const followers = document.querySelector('a[href*=\"/followers\"]')?.textContent ||
+                                document.querySelector('span[class*=\"followers\"]')?.textContent ||
+                                document.querySelector('span[class*=\"follower\"]')?.textContent;
+                const following = document.querySelector('a[href*=\"/following\"]')?.textContent ||
+                                document.querySelector('span[class*=\"following\"]')?.textContent ||
+                                document.querySelector('span[class*=\"follow\"]')?.textContent;
                 data['bio'] = bio;
                 data['followers'] = followers;
                 data['following'] = following;
                 return data;
             }""")
-            
-            # Save to database
             self.db.save_user_profile(username, profile_data)
-            
             logger.info(f"Profile data extracted and saved: {profile_data}")
             return {
                 "data": {
@@ -186,61 +182,45 @@ class ThreadsScraper:
         """
         logger.info(f"Getting threads for user: {username}")
         try:
-            # First ensure we're logged in
             is_logged_in = await self.ensure_logged_in()
             if not is_logged_in:
                 raise Exception("Please log in first")
-                
-            # Navigate to profile with a more lenient wait condition
-            await self.page.goto(f'https://www.threads.net/@{username}', wait_until='domcontentloaded')
+            # Use helper to navigate and validate
+            if not await self.goto_and_validate_profile(username):
+                raise Exception("Failed to reach the correct profile page. Possible redirect or session issue.")
             logger.info("Page loaded, waiting for threads")
-            
-            # Wait for threads with a longer timeout
-            try:
-                await self.page.wait_for_selector('article', timeout=10000)
-                logger.info("Threads loaded")
-            except TimeoutError:
-                logger.warning("Timeout waiting for threads, proceeding anyway")
-            
             # Scroll to load more threads
             await self.page.evaluate("""() => {
                 window.scrollTo(0, document.body.scrollHeight);
             }""")
-            await asyncio.sleep(2)  # Wait for scroll to complete
-            
+            await asyncio.sleep(2)
             # Extract thread data
             threads = await self.page.evaluate("""() => {
                 const threads = [];
                 document.querySelectorAll('article').forEach(article => {
-                    const textDivs = article.querySelectorAll('div[dir="auto"]');
+                    const textDivs = article.querySelectorAll('div[dir=\"auto\"]');
                     let text = '';
                     for (let div of textDivs) {
                         if (div.textContent && div.textContent.trim().length > 0) {
                             text = div.textContent.trim();
-                            break; // Use the first non-empty one
+                            break;
                         }
                     }
-                    // Fallbacks
                     if (!text) {
                         const p = article.querySelector('p');
                         if (p && p.textContent.trim().length > 0) text = p.textContent.trim();
                     }
-                    
-                    const likes = article.querySelector('span[class*="like"]')?.textContent;
-                    const replies = article.querySelector('span[class*="reply"]')?.textContent;
-                    const reposts = article.querySelector('span[class*="repost"]')?.textContent;
+                    const likes = article.querySelector('span[class*=\"like\"]')?.textContent;
+                    const replies = article.querySelector('span[class*=\"reply\"]')?.textContent;
+                    const reposts = article.querySelector('span[class*=\"repost\"]')?.textContent;
                     const time = article.querySelector('time')?.dateTime;
-                    const url = article.querySelector('a[href*="/post/"]')?.href;
-                    
-                    // Extract media URLs
+                    const url = article.querySelector('a[href*=\"/post/\"]')?.href;
                     const mediaUrls = [];
                     article.querySelectorAll('img').forEach(img => {
                         if (img.src && !img.src.includes('data:')) {
                             mediaUrls.push(img.src);
                         }
                     });
-                    
-                    // Extract hashtags and mentions
                     const hashtags = [];
                     const mentions = [];
                     if (text) {
@@ -252,10 +232,7 @@ class ThreadsScraper:
                             }
                         });
                     }
-                    
-                    // Extract thread ID from URL
                     const threadId = url ? url.split('/').pop() : '';
-                    
                     threads.push({
                         id: threadId,
                         text,
@@ -271,15 +248,10 @@ class ThreadsScraper:
                 });
                 return threads;
             }""")
-            
-            # Save to database
             self.db.save_user_threads(username, threads)
-            
             logger.info(f"Found and saved {len(threads)} threads")
-            
-            # Log the most recent post
             if threads:
-                last_post = threads[0]  # First post is the most recent
+                last_post = threads[0]
                 logger.info(f"Most recent post by @{username}:")
                 logger.info(f"Text: {last_post['text']}")
                 logger.info(f"Likes: {last_post['likes']}")
@@ -287,7 +259,6 @@ class ThreadsScraper:
                 logger.info(f"Time: {last_post['time']}")
             else:
                 logger.info(f"No posts found for @{username}")
-            
             return {
                 "data": {
                     "mediaData": {
@@ -320,28 +291,19 @@ class ThreadsScraper:
         Get a user's feed (their posts and posts they've interacted with).
         """
         logger.info(f"Getting feed for user: {username}")
-
         for attempt in range(max_retries):
             try:
                 if not await self.ensure_logged_in():
                     raise Exception("Please log in first")
-
-                # Only navigate if not already on the correct profile page
-                expected_urls = [f"https://www.threads.net/@{username}", f"https://www.threads.com/@{username}"]
-                if not any(self.page.url.startswith(url) for url in expected_urls):
-                    await self.page.goto(expected_urls[0], wait_until='domcontentloaded')
-                    logger.info("Navigated to profile page")
-
+                # Use helper to navigate and validate
+                if not await self.goto_and_validate_profile(username):
+                    raise Exception("Failed to reach the correct profile page. Possible redirect or session issue.")
                 # Wait for posts to appear
                 try:
                     await self.page.wait_for_selector('article', timeout=10000)
                 except TimeoutError:
                     logger.warning("Timeout waiting for posts, proceeding to scroll")
-
-                # Scroll until no more new posts are loaded
                 await self.scroll_until_no_more_posts()
-
-                # Extract posts
                 feed = await self.page.evaluate(r"""() => {
                     const feed = [];
                     document.querySelectorAll('article').forEach(article => {
@@ -386,20 +348,17 @@ class ThreadsScraper:
                     });
                     return feed;
                 }""")
-
                 if not feed:
                     logger.warning(f"No posts found in feed (attempt {attempt + 1}/{max_retries})")
                     if attempt < max_retries - 1:
                         await asyncio.sleep(2)
                         continue
-
                 self.db.save_user_threads(username, feed)
                 logger.info(f"Found and saved {len(feed)} feed items")
                 return {
                     "data": {"feedData": {"posts": feed}},
                     "extensions": {"is_final": True}
                 }
-
             except Exception as e:
                 logger.error(f"Error getting feed (attempt {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
